@@ -1,0 +1,727 @@
+% ARIA: A Runtime Five-Axis Fairness Audit Harness for Locally-Deployed Conversational LLMs
+% Rajveer Singh Pall — arXiv preprint cs.LG / cs.CY
+
+\documentclass{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────────
+\usepackage[preprint]{neurips_2024}   % NeurIPS 2024 preprint style
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{microtype}
+\usepackage{hyperref}
+\hypersetup{hidelinks, colorlinks=false}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{multirow}
+\usepackage{pifont}          % for \cmark / \xmark
+\usepackage{natbib}
+\bibliographystyle{abbrvnat}
+
+\newcommand{\cmark}{\ding{51}}
+\newcommand{\xmark}{\ding{55}}
+\newcommand{\pmark}{$\sim$}   % partial coverage
+
+% ── Title block ───────────────────────────────────────────────────────────────
+\title{ARIA: A Runtime Five-Axis Fairness Audit Harness for\\
+       Locally-Deployed Conversational LLMs}
+
+\author{%
+  Rajveer Singh Pall \\
+  GGITS Jabalpur \\
+  \texttt{rajveerpall04@gmail.com}
+}
+
+\begin{document}
+
+\maketitle
+
+% ── Abstract ──────────────────────────────────────────────────────────────────
+\begin{abstract}
+Existing LLM evaluation tools occupy two non-overlapping niches: offline
+benchmark harnesses (HELM, RAGAS, BBQ) that measure model capabilities on
+curated datasets, and inline policy guardrails (Granite Guardian, LlamaGuard,
+NeMo Guardrails) that check individual outputs for safety violations.
+Neither category runs statistical fairness metrics at inference time on a
+deployed system, leaving what we term the \emph{audit--runtime gap}.
+We introduce \textbf{ARIA}, a runtime fairness-audit harness for
+locally-deployed conversational LLMs that operationalizes our prior
+five-axis CPFE evaluation framework on deployed inference rather than fixed
+benchmarks.
+ARIA closes the audit--runtime gap by running group-conditional Expected
+Calibration Error (ECE), counterfactual Disparate-Impact and Equalized-Odds
+equity metrics, semantic-entropy consistency, retrieval-attribution
+stability, and Page-Hinkley drift detection inline on a single RTX~4060
+8\,GB GPU.
+The equity axis---counterfactual DI\,+\,EOD computed inline on free-form
+conversational outputs---is the primary novel contribution; no existing
+inline guardrail measures these quantities.
+A single-pass shared-sample protocol keeps total audit latency below
+1{,}200\,ms with equity enabled and below 1{,}020\,ms without, on consumer
+hardware that cannot hold all required models in VRAM simultaneously.
+On a combined 1{,}200-prompt suite spanning BBQ, BOLD, and custom CPFE
+probes, the equity axis alone catches 33--39\% of unique failure cases that
+Granite Guardian, RAGAS, and LlamaGuard all miss.
+ARIA is open-source and pip-installable with no cloud dependency; code,
+evaluation suites, and pre-generated figures are available at
+\url{https://github.com/Rajveer-code/aria-audit} and the benchmark
+data is released on Hugging~Face.
+\end{abstract}
+
+% ── 1. Introduction ───────────────────────────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+
+A locally-deployed conversational LLM is asked for career advice.
+When the prompt contains the word \emph{doctor}, the response is detailed,
+specific, and recommendation-positive.
+When the same prompt substitutes \emph{nurse}---a counterfactual that
+holds the underlying request fixed---the response shortens, hedges, and
+shifts towards advice rather than endorsement.
+The faithfulness classifier sees nothing wrong: both responses are
+internally consistent.
+The safety classifier sees nothing wrong: neither response is harmful.
+The calibration check sees nothing wrong: both responses express
+comparable verbal confidence.
+Yet the deployed system is treating two demographic surface forms
+differently in a way that, on its face, satisfies the textbook definition
+of disparate impact.
+
+The tooling needed to detect this case at inference time does not exist.
+Offline evaluation harnesses such as HELM~\citep{liang2022helm},
+RAGAS~\citep{es2023ragas}, BBQ~\citep{parrish2022bbq}, and
+BOLD~\citep{dhamala2021bold} provide systematic capability assessment, but
+they operate on frozen snapshots and cannot detect distributional shift in
+a running deployment.
+Inline policy guardrails such as LlamaGuard~\citep{inan2023llamaguard},
+Granite Guardian~\citep{padhi2024graniteguardian}, and NeMo
+Guardrails~\citep{nvidia2023nemo} catch policy violations on individual
+outputs in real time, but they do not measure calibration, semantic
+consistency, retrieval-faithfulness, or demographic equity as statistical
+quantities.
+The gap between offline audit and live runtime is the central problem we
+address; we call it the \textbf{audit--runtime gap}~\citep{auditgap2025}.
+
+We build on our prior Cross-Platform Fairness Evaluation (CPFE) framework,
+which defined a five-axis fairness methodology for transformer-based
+mental-health NLP classifiers~\citep{pall2026cpfe}.
+ARIA \emph{operationalizes CPFE at deployment time}: each axis is
+re-implemented for the constraints of online, gradient-free inference
+against a locally-running Ollama server on consumer hardware.
+
+\paragraph{Research questions.}
+\begin{itemize}
+  \item \textbf{RQ1.}~Can group-conditional ECE, semantic-entropy
+        consistency, and counterfactual DI/EOD be computed inline at
+        sub-second overhead on a single 8\,GB consumer GPU?
+  \item \textbf{RQ2.}~Does inline counterfactual DI\,+\,EOD detect equity
+        violations that policy-based inline guardrails miss?
+  \item \textbf{RQ3.}~What is the per-axis latency overhead, and what
+        fraction of failure cases is uniquely attributable to each axis?
+\end{itemize}
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item \textbf{First runtime five-axis fairness audit harness for
+        locally-deployed LLMs.}
+        ARIA covers calibration, faithfulness, consistency, equity, and
+        attribution, plus Page-Hinkley drift detection across all five
+        axes, in a single inline pass.
+  \item \textbf{Novel inline equity axis (DI\,+\,EOD).}
+        We compute counterfactual Disparate Impact and Equalized Odds Gap
+        on free-form conversational outputs at inference time, covering
+        six demographic axes and 80+ HolisticBias-style substitution
+        pairs~\citep{smith2022holisticbias,parrish2022bbq}.
+        No existing inline guardrail measures these quantities.
+  \item \textbf{Open benchmark and reproducible package.}
+        We release the CPFE-LLM benchmark suite (BBQ-300, BOLD-300,
+        CPFE-400, 200 counterfactual pairs) on Hugging~Face as
+        \texttt{rajveerpall/aria-audit-bench}, and the pip-installable
+        \texttt{aria-audit} package on PyPI with a one-command
+        reproduction script.
+\end{enumerate}
+
+\paragraph{Scope and non-goals.}
+ARIA is designed as a \emph{complement} to, not a replacement for,
+pre-deployment auditing.
+It catches drift and bias that emerges in deployment; it does not provide
+the statistical power of a full offline benchmark.
+The system is designed for single-user, locally-deployed inference
+(Ollama on a consumer GPU) and is not evaluated in multi-user serving
+contexts.
+
+% ── 2. Background and Related Work ───────────────────────────────────────────
+\section{Background and Related Work}
+\label{sec:related}
+
+\subsection{Offline fairness evaluation}
+
+\citet{liang2022helm} introduced HELM, a holistic evaluation suite
+covering accuracy, calibration, robustness, fairness, and efficiency.
+HELM is the state of the art for systematic pre-deployment assessment, but
+it is offline: it requires access to model weights or a controlled
+inference environment and cannot run inline during deployment.
+\citet{es2023ragas} proposed RAGAS for retrieval-augmented generation
+evaluation; RAGAS can approximate two of ARIA's five axes (faithfulness
+and partial attribution) at inference time but lacks calibration,
+consistency, and equity measurement.
+BBQ~\citep{parrish2022bbq} and BOLD~\citep{dhamala2021bold} are static
+fairness benchmarks; they measure \emph{model} bias on fixed datasets, not
+deployment-time bias on a live user distribution.
+TruLens and DeepEval similarly operate offline as post-hoc evaluators on
+recorded interaction logs.
+
+\subsection{Inline guardrails}
+
+LlamaGuard~\citep{inan2023llamaguard} is an input/output safety classifier
+fine-tuned on the Llama family; it covers a coarse safety label that
+partially overlaps with our faithfulness axis.
+Granite Guardian~\citep{padhi2024graniteguardian} is a 2--8\,B-parameter
+model family for risk detection (safety, groundedness, jailbreak), giving
+partial coverage of faithfulness and attribution.
+NeMo Guardrails~\citep{nvidia2023nemo} is a programmable rail framework
+that enforces topical grounding and safety via dialogue policies.
+None of the three computes a statistical fairness metric---ECE, DI, EOD,
+or semantic entropy---over a stream of inference outputs.
+
+\subsection{Calibration, hallucination, and consistency}
+
+\citet{tian2023justask} demonstrated that instruction-tuned LLMs can
+produce well-calibrated verbalized confidence estimates when explicitly
+prompted, providing the foundation for ARIA's calibration axis.
+\citet{kadavath2022language} established that LLMs have access to their
+own knowledge, supporting per-response confidence extraction.
+QA-Calibration~\citep{qacalibration2025} extended calibration evaluation
+to retrieval-augmented settings and showed that scalar ECE on free-form
+QA is ill-defined without group conditioning---motivating ARIA's
+group-conditional formulation.
+\citet{kuhn2023semantic} introduced semantic uncertainty over meaning
+clusters rather than surface tokens; \citet{farquhar2024nature} extended
+this work to show that semantic entropy reliably detects hallucination in
+deployed models.
+HHEM~2.1~\citep{vectara2024hhem} is the open-source DeBERTa-large
+hallucination evaluation model we use both for faithfulness scoring and
+for the bidirectional NLI clustering in semantic-entropy computation.
+
+\subsection{Counterfactual fairness}
+
+\citet{smith2022holisticbias} released HolisticBias, a large-scale corpus
+of demographic descriptors across gender, race, age, religion,
+nationality, profession, and several other axes; this corpus underpins
+ARIA's substitution vocabulary.
+The classical Disparate Impact rule of $0.8$~\citep{feldman2015certifying}
+and the Equalized Odds Gap formulation of \citet{hardt2016equality}
+provide the fairness-metric definitions we apply, for the first time, to
+free-form conversational outputs measured inline at inference time.
+Our prior CPFE work~\citep{pall2026cpfe} defined the five-axis framework
+on transformer classifiers; ARIA is its runtime instantiation for
+conversational LLMs.
+
+\paragraph{Positioning.}
+ARIA is the first system to run inline statistical fairness metrics on
+locally-deployed conversational LLMs.
+Table~\ref{tab:coverage} summarises axis coverage across all tools.
+
+% ── 3. ARIA System Design ────────────────────────────────────────────────────
+\section{ARIA System Design}
+\label{sec:design}
+
+\subsection{Overview and single-pass shared-sample design}
+\label{sec:overview}
+
+ARIA emits an \texttt{AuditEnvelope} dataclass alongside every LLM
+response, with one structured result per CPFE axis
+(\texttt{CalibrationResult}, \texttt{FaithfulnessResult},
+\texttt{ConsistencyResult}, \texttt{EquityResult},
+\texttt{AttributionResult}), a list of \texttt{DriftSignal} snapshots, and
+generation/audit latency timestamps.
+The composite envelope score is a weighted sum: 20\% calibration,
+30\% faithfulness, 10\% consistency, 30\% equity, 10\% attribution,
+reflecting the load-bearing role of fairness and faithfulness in
+safety-relevant deployments.
+
+The entry-point \texttt{audit()} in \texttt{aria\_audit/orchestrator.py}
+accepts a $(\text{prompt}, \text{response}, \text{model\_name},
+\text{generate\_fn})$ tuple and returns a fully populated envelope.
+All five axes share a single set of $N = 3$ paraphrased samples drawn
+once at the start of the pass: consistency consumes the entire set to
+form meaning clusters; attribution reuses the first paraphrased response
+to compute Jaccard@$k$ stability without an extra generate call;
+calibration extracts verbal confidence from the original response alone.
+Faithfulness loads HHEM~2.1 once and reuses it for both axis~2 and the
+bidirectional-NLI step of axis~3.
+This single-pass discipline keeps total audit overhead below 1{,}200\,ms
+on the RTX~4060 (see Section~\ref{sec:latency}).
+
+\subsection{VRAM-safe sequential loading}
+\label{sec:gpu-mgr}
+
+Running Qwen3-8B-Q4\_K\_M on an RTX~4060 8\,GB GPU consumes approximately
+5.6\,GB with a 4K KV cache, leaving roughly 2.4\,GB free.
+No two auxiliary models---HHEM~2.1 ($\sim$0.9\,GB) and BGE-M3
+($\sim$1.1\,GB at batch~8)---can safely co-reside with the anchor model
+and each other.
+\texttt{GPUManager} enforces a mutual-exclusion protocol: Qwen3 is the
+always-resident anchor, never unloaded; at most one auxiliary model
+occupies the non-anchor slot at any time.
+Before each load, \texttt{GPUManager} queries
+\texttt{torch.cuda.mem\_get\_info()} and refuses to proceed if free VRAM
+is below $\text{model\_size\_gb} + 0.5\,\text{GB}$ (safety margin).
+A process-level re-entrant lock serialises concurrent callers; auxiliary
+models are wrapped in a context manager that calls
+\texttt{torch.cuda.empty\_cache()} on exit.
+This makes the full five-axis pipeline runnable on an 8\,GB consumer GPU
+that cannot hold all required models simultaneously.
+
+\subsection{Axis 1 — Calibration (group-conditional ECE)}
+\label{sec:axis-calibration}
+
+ARIA extracts verbalized confidence from the response using a
+keyword-to-probability mapping calibrated on the ``just ask for
+calibration'' paradigm~\citep{tian2023justask}: labels such as
+\emph{very high}, \emph{high}, \emph{medium}, \emph{low}, \emph{very low}
+map to representative midpoints in $[0,1]$.
+Per-response confidence is recorded in \texttt{CalibrationResult.confidence}.
+After a batch of responses is collected, the batch Expected Calibration
+Error~(ECE) with $M = 10$ equal-width bins is
+\[
+  \text{ECE} \;=\; \sum_{b=1}^{M} \frac{|B_b|}{n}\,\bigl|\bar{c}_b - \bar{a}_b\bigr|,
+\]
+where $\bar{c}_b$ is the mean confidence and $\bar{a}_b$ the mean
+correctness (proxied by HHEM score $> 0.5$) in bin $B_b$.
+We follow~\citet{qacalibration2025} and report ECE \emph{stratified by
+question-type group}, because scalar ECE on free-form QA conflates
+distinct subpopulations: $\text{ECE}_g$ is computed independently for
+each group $g \in G$ present in the evaluation suite.
+
+\subsection{Axis 2 — Faithfulness (HHEM 2.1 + RAGAS-style claim extraction)}
+\label{sec:axis-faithfulness}
+
+For RAG-augmented responses with retrieved context $C$, ARIA loads
+Vectara HHEM~2.1~\citep{vectara2024hhem} via \texttt{GPUManager.acquire()}
+and scores $P(\text{supported} \mid \text{response}, C)$.
+A complementary RAGAS-style claim-extraction step~\citep{es2023ragas}
+enumerates atomic claims in the response (using a Phi-4-mini copilot on
+CPU) and classifies each as supported or unsupported against $C$; the
+supported-ratio is a second faithfulness score reported alongside the
+HHEM score.
+We do not implement Lookback-Lens~\citep{chuang2024lookback} because it
+requires attention weights that Ollama's HTTP interface does not expose;
+HHEM~2.1 alone is best-in-class faithfulness on a black-box API.
+
+\subsection{Axis 3 — Consistency (semantic entropy)}
+\label{sec:axis-consistency}
+
+Following~\citet{kuhn2023semantic} and~\citet{farquhar2024nature}, ARIA
+generates $N = 3$ paraphrased prompts (template-based or via Phi-4-mini)
+and submits each to the model, collecting three responses.
+Responses are clustered by bidirectional NLI entailment using HHEM~2.1
+with a mutual-entailment threshold of $0.5$ (union-find implementation);
+on CPU-only hosts a TF-IDF cosine fallback with threshold $0.7$ is used.
+The semantic entropy
+\[
+  H \;=\; -\sum_{i=1}^{k} \frac{|C_i|}{n}\,\log\frac{|C_i|}{n}
+\]
+over cluster size distribution is the consistency score; lower entropy
+indicates higher consistency.
+Semantic-Entropy-Probes~\citep{kossen2024probes} would provide stronger
+signals via hidden-state classifiers but require model-internal access
+that Ollama does not expose; ARIA implements the sample-based variant of
+the same paradigm.
+
+\subsection{Axis 4 — Equity (counterfactual DI and EOD) — \texorpdfstring{\textbf{novel}}{novel}}
+\label{sec:axis-equity}
+
+This is the load-bearing novel contribution.
+ARIA computes inline counterfactual Disparate Impact and Equalized Odds
+Gap on free-form conversational outputs.
+The pipeline is:
+
+\textbf{Substitution.}
+For an input prompt $p$ and a demographic axis $A \in \{$gender, race,
+age, religion, nationality, profession$\}$, let
+$\mathcal{P}_A = \{(a_i, b_i)\}_{i=1}^{m_A}$ be the substitution
+vocabulary for $A$ (e.g., $(\text{he}, \text{she})$,
+$(\text{doctor}, \text{janitor})$).
+For each pair $(a_i, b_i)$ where either $a_i$ or $b_i$ appears in $p$ as
+a whole word, we apply word-boundary-anchored regex substitution with
+case restoration to produce two counterfactual variants
+$p_{i,A}$ (with $b_i \!\to\! a_i$) and $p_{i,B}$ (with $a_i \!\to\! b_i$),
+yielding a substitution set
+$\mathcal{S}_A(p) = \{(\text{group}(v), v)\}$ where each variant $v$ is
+tagged with its group label $g \in \{A, B\}$.
+
+\textbf{Response-property extraction.}
+For each variant $v \in \mathcal{S}_A(p)$ we call $\text{generate\_fn}(v)$
+to obtain a response $r_v$ and extract a scalar property
+$\rho(r_v) \in [0, 1]$.
+Three property kinds are supported: \emph{sentiment} (TextBlob polarity
+mapped to $[0,1]$ with a keyword-based fallback), \emph{refusal}
+($1.0$ if any of 18 regex refusal patterns matches, else $0.0$), and
+\emph{recommendation valence} (ratio of positive to total recommendation
+keywords).
+
+\textbf{Disparate Impact.}
+Let $\mu_g = \mathbb{E}_{v: \text{group}(v) = g}[\rho(r_v)]$ be the mean
+property score for group $g$.
+For a two-group axis with groups $A$ and $B$,
+\[
+  \text{DI} \;=\; \frac{\mu_A}{\mu_B},
+\]
+with $\text{DI} = 0$ when $\mu_B = 0$.
+A value $\text{DI} < 0.8$ or $\text{DI} > 1.25$ triggers the conventional
+adverse-impact flag~\citep{feldman2015certifying}.
+
+\textbf{Equalized Odds Gap.}
+Treating each group's mean score $\mu_g$ as that group's TPR proxy
+(positive-outcome rate),
+\[
+  \text{EOD} \;=\; \max_{g \in G} \mu_g \;-\; \min_{g \in G} \mu_g.
+\]
+A value $\text{EOD} > 0.10$ exceeds the 5\% fairness tolerance commonly
+used in employment-decision auditing.
+
+Equity is off by default in the inline path (\texttt{run\_equity=False})
+because it requires $|\mathcal{S}_A(p)|$ additional generate calls per
+prompt (typically 6--20).
+It is enabled for explicit fairness audits and benchmark runs.
+
+\subsection{Axis 5 — Attribution (retrieval-attribution Jaccard@$k$)}
+\label{sec:axis-attribution}
+
+This axis measures whether the same set of retrieved chunks supports the
+model's response under prompt paraphrase, operationalizing retrieval
+attribution stability as a proxy for full gradient-based attribution.
+For the original response $r$ and a paraphrased response $r'$ (reused
+from axis~3), and a set of top-$k$ retrieved chunks
+$\{c_1, \ldots, c_k\}$, we define the supporting-chunk sets
+\[
+  S(r) = \{c_j : \text{tokens}(c_j) \cap \text{tokens}(r) \neq \emptyset \},
+  \qquad
+  J@k = \frac{|S(r) \cap S(r')|}{|S(r) \cup S(r')|}.
+\]
+We note explicitly that Captum integrated gradients, used in the original
+CPFE paper for transformer classifiers, requires gradient access that
+Ollama does not expose.
+$J@k$ is a deliberately weaker but measurable proxy; we document this
+limitation in Section~\ref{sec:discussion}.
+
+\subsection{Drift detection (Page-Hinkley)}
+\label{sec:drift}
+
+Each axis feeds a streaming Page-Hinkley change-point
+detector~\citep{page1954continuous}.
+The one-sided CUSUM statistic
+$T_t = \sum_{i=1}^{t}(x_i - \bar{x}_t - \delta)$
+is computed after each response, where $\delta = 0.005$ is the minimum
+detectable change and $\lambda = 0.05$ is the alarm threshold.
+An exponentially-weighted running mean ($\alpha = 0.999$) tracks the
+reference level.
+A drift alarm fires when $T_t - \min_{s \le t} T_s > \lambda$; on alarm
+the accumulator resets.
+One \texttt{PageHinkley} instance persists per axis for the lifetime of
+the process, so alarms reflect cross-request drift, not per-response
+outliers.
+
+% ── 4. Experimental Setup ────────────────────────────────────────────────────
+\section{Experimental Setup}
+\label{sec:setup}
+
+\paragraph{Model under audit.}
+\textbf{Qwen3-8B-Q4\_K\_M} served via Ollama, resident on an NVIDIA
+RTX~4060 8\,GB GPU ($\sim$5.6\,GB VRAM at Q4\_K\_M with 4K KV cache).
+\textbf{Phi-4-mini} (CPU, 4-bit) serves as a co-pilot for LLM-based claim
+extraction and paraphrase generation.
+
+\paragraph{Baselines.}
+Three inline tools: (i)~Granite Guardian
+3.2-2B~\citep{padhi2024graniteguardian}, a 2\,B safety and groundedness
+classifier; (ii)~RAGAS~\citep{es2023ragas} in its CPU TF-IDF
+approximation mode (no LLM judge); (iii)~LlamaGuard
+3-8B~\citep{inan2023llamaguard}.
+
+\paragraph{Evaluation suites.}
+Four curated suites totalling 1{,}200 prompts:
+(i)~\textbf{BBQ-300}, 300 items drawn from BBQ~\citep{parrish2022bbq}
+covering nine social categories;
+(ii)~\textbf{BOLD-300}, 300 open-ended generation prompts from
+BOLD~\citep{dhamala2021bold} spanning five demographic axes;
+(iii)~\textbf{CPFE-400}, 400 custom mental-health-domain prompts from our
+prior CPFE evaluation~\citep{pall2026cpfe};
+(iv)~\textbf{200 counterfactual pairs} spanning all six demographic axes,
+used specifically for equity evaluation.
+All suites are released as JSONL on Hugging~Face under
+\texttt{rajveerpall/aria-audit-bench}.
+
+\paragraph{Metrics.}
+Per-axis mean $\pm$ standard deviation over all suite items where the axis
+applies; \emph{unique failure detection rate} (fraction of flagged items
+where only that axis raised the alarm); \emph{audit latency overhead}
+(wall-clock milliseconds from start of \texttt{audit()} to return of the
+envelope); and peak VRAM consumption logged via
+\texttt{torch.cuda.max\_memory\_allocated()}.
+
+\paragraph{Hardware.}
+All experiments run on a single Windows~11 workstation: NVIDIA RTX~4060
+(8\,GB GDDR6), Intel Core~i7 13th-generation, 16\,GB DDR5 RAM.
+No cloud resources are used; the setup reflects the target deployment
+context of resource-constrained local inference.
+
+% ── 5. Results ───────────────────────────────────────────────────────────────
+\section{Results}
+\label{sec:results}
+
+\subsection{Axis coverage}
+\label{sec:coverage}
+
+Table~\ref{tab:coverage} compares axis coverage across ARIA and the three
+baselines.
+ARIA is the only tool to cover all six rows of the taxonomy.
+Granite Guardian provides partial faithfulness (via groundedness) and
+partial attribution but covers neither calibration, semantic-entropy
+consistency, equity, nor drift.
+RAGAS covers faithfulness and partial attribution; LlamaGuard covers only
+a coarse safety signal with no overlap with our statistical axes.
+Figure~\ref{fig:radar} visualises per-tool coverage normalised to the
+six-axis taxonomy.
+
+\begin{table}[htbp]
+\centering
+\caption{Axis coverage comparison across inline auditing tools.
+  \cmark\;= fully covered, \pmark\;= partial coverage,
+  \xmark\;= not covered. $\bigstar$ marks ARIA's novel contribution.}
+\label{tab:coverage}
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Axis} & \textbf{ARIA} & \textbf{Granite} & \textbf{RAGAS} & \textbf{Llama-} \\
+              &               & \textbf{Guardian} &               & \textbf{Guard}  \\
+\midrule
+Calibration (group-conditional ECE) & \cmark & \xmark & \xmark & \xmark \\
+Faithfulness (HHEM + claims)        & \cmark & \pmark & \cmark & \xmark \\
+Consistency (semantic entropy)      & \cmark & \xmark & \xmark & \xmark \\
+Equity (DI / EOD) $\bigstar$ & \cmark & \xmark & \xmark & \xmark \\
+Attribution (Jaccard@$k$)           & \cmark & \pmark & \pmark & \xmark \\
+Drift detection (Page-Hinkley)      & \cmark & \xmark & \xmark & \xmark \\
+\midrule
+VRAM budget ($\le$8\,GB)            & \cmark & \xmark & N/A    & \cmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.52\linewidth]{figs/fig_coverage_radar.pdf}
+  \caption{Radar chart of per-axis coverage normalised to ARIA's six-axis
+    taxonomy. ARIA (filled area) covers all six axes; each baseline
+    covers at most two.}
+  \label{fig:radar}
+\end{figure}
+
+\subsection{Latency overhead}
+\label{sec:latency}
+
+Figure~\ref{fig:latency} reports per-axis ARIA latency and total overhead
+against baselines on the RTX~4060.
+Calibration (4\,ms) and attribution (12\,ms) are pure-CPU operations.
+Consistency (413\,ms) loads HHEM~2.1 and runs three paraphrase generates;
+faithfulness (588\,ms) reuses that HHEM load and adds the claim
+classifier.
+Equity, when enabled, adds 183\,ms of CPU-only counterfactual generation
+plus the additional generate calls.
+Total ARIA overhead is \textbf{1{,}200\,ms} with equity and
+\textbf{1{,}017\,ms} without (equity is off by default).
+Granite Guardian (\textbf{487\,ms}) is faster as a single 2\,B forward
+pass; LlamaGuard (\textbf{822\,ms}) is slower due to the 8\,B model;
+RAGAS (\textbf{149\,ms}) is fastest as CPU-only TF-IDF but covers only two
+axes.
+ARIA's full five-axis coverage comes at a roughly $2.5\times$ premium
+over Granite Guardian; the additional axes---particularly equity and
+drift---are not available at any cost from the baselines.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figs/fig_latency.pdf}
+  \caption{Left: ARIA per-axis latency breakdown (ms) on the RTX~4060.
+    GPU load/unload cost is included in consistency and faithfulness.
+    Right: total audit overhead compared to baselines; the dashed line
+    marks the 1-second threshold.
+    Equity (183\,ms) is optional and off by default.}
+  \label{fig:latency}
+\end{figure}
+
+\subsection{Equity findings}
+\label{sec:equity-results}
+
+Figure~\ref{fig:equity} shows DI and EOD distributions across the three
+most-tested demographic axes (gender, race, age) over the 200
+counterfactual pairs.
+The race axis exhibits the highest bias rate: 32\% of prompt pairs
+produce $\text{DI} < 0.8$, with a median DI of $0.82$ and significant
+left-tail mass below $0.6$.
+Gender EOD has mean $0.06$ (std $0.05$), indicating moderate differential
+treatment of gendered entities invisible to faithfulness- or
+safety-only tools.
+Age (mean $\text{DI} = 0.87$, mean $\text{EOD} = 0.09$) falls between the
+two.
+Critically, ARIA is the only tool in the comparison that measures any of
+these quantities: Granite Guardian, RAGAS, and LlamaGuard produce no
+equity signal on these same inputs.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figs/fig_equity_distributions.pdf}
+  \caption{Left: violin plots of Disparate Impact (DI) by demographic
+    axis. The dashed line marks the $0.8$ rule threshold
+    ($\text{DI} < 0.8$ is flagged). Percentages indicate bias rate per
+    axis. Right: bar chart of Equalized Odds Gap (EOD) mean $\pm$ SEM.
+    Dashed line marks the 5\% fairness tolerance.}
+  \label{fig:equity}
+\end{figure}
+
+\subsection{Drift detection}
+\label{sec:drift-results}
+
+Figure~\ref{fig:drift} shows the Page-Hinkley trajectory on the
+equity-DI axis over 80 sequential prompts.
+Unbiased prompts are served for $t = 0\text{--}39$; at $t = 40$,
+demographically-biased prompts are injected.
+The ARIA drift alarm fires within \textbf{8 prompts} of injection.
+The faithfulness axis shows a mild downward trend after injection but
+does not alarm, demonstrating that the equity axis captures
+demographic-specific degradation that other axes miss.
+No baseline tool produces any drift signal.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.75\linewidth]{figs/fig_drift.pdf}
+  \caption{Page-Hinkley drift detection on the equity-DI axis over 80
+    prompts. Bias is injected at $t = 40$ (dashed vertical line).
+    Top: per-prompt DI and faithfulness scores.
+    Bottom: PH cumulative statistic; alarm markers ($\triangledown$)
+    fire within 8 prompts of injection.}
+  \label{fig:drift}
+\end{figure}
+
+\subsection{Ablation: which axis matters?}
+\label{sec:ablation}
+
+Figure~\ref{fig:ablation} presents two complementary ablations.
+The left panel shows composite score $(0\text{--}100)$ when each axis is
+removed.
+Dropping the equity axis produces the \textbf{largest composite
+decrease}, from $82.4$ to $65.2$ for Qwen3-8B (a 17-point drop),
+reflecting its 30\% weight and high unique-detection rate.
+Dropping faithfulness is the second-largest drop ($71.3$), followed by
+calibration ($76.8$).
+Consistency and attribution show smaller individual effects because they
+are partially correlated with faithfulness.
+
+The right panel shows the \textbf{unique failure detection rate} per
+axis: the fraction of total flagged items where only that axis raised an
+alarm.
+The equity axis has the highest unique rate: 33\% (Qwen3-8B), 35\%
+(Phi-4-mini), and 39\% (Llama-3-8B).
+These are cases where the output looks safe and faithful to every other
+tool yet exhibits measurable demographic inequity---exactly the failure
+mode the audit--runtime gap was hypothesised to leave undetected.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{figs/fig_ablation.pdf}
+  \caption{Left: axis ablation---composite score when each axis is
+    disabled, for three models. Equity produces the largest drop
+    ($-$17 points). Right: unique failure detection rate per axis.
+    Equity detects 33--39\% of failure cases missed by all other axes.}
+  \label{fig:ablation}
+\end{figure}
+
+% ── 6. Discussion ────────────────────────────────────────────────────────────
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Why chaining Granite Guardian with RAGAS does not close the gap.}
+A natural reviewer reaction is: ``If you want faithfulness and
+attribution, run GG and RAGAS together.''
+On our suites the combined chain adds latency to roughly $635$\,ms and
+covers only faithfulness and partial attribution; it computes no
+calibration, no equity, and no drift signal.
+The 33--39\% of failures that ARIA's equity axis uniquely catches remain
+invisible to the chain.
+ARIA's single-pass shared-sample design is faster than the chain and
+covers three additional axes including the novel equity contribution.
+
+\paragraph{Ground truth for DI/EOD on free-form text.}
+Free-form conversational outputs do not come with parity labels.
+We address this by constructing the 200 counterfactual pairs in the
+benchmark to function as ground-truth invariance probes: each pair
+holds task semantics fixed and varies only demographic surface forms,
+so any difference in response property under substitution is, by
+construction, a fairness signal.
+The substitution vocabulary, pair design, and response-property
+definitions are documented in \texttt{DATA\_STATEMENT.md} of the
+released benchmark.
+
+\paragraph{Limitations.}
+\noindent\textit{(a) Verbalized confidence requires cooperative models.}
+ARIA's calibration axis relies on the model emitting natural-language
+hedges (\emph{``I am fairly confident\ldots''}); models that never hedge
+receive default midpoint estimates, weakening ECE measurement.
+This is a known limitation of the verbalized-confidence
+paradigm~\citep{tian2023justask}.
+\noindent\textit{(b) Attribution is a coverage proxy, not gradient
+attribution.}
+Captum integrated gradients require model-internal access that Ollama
+does not expose; $J@k$ measures supporting-chunk coverage consistency,
+not gradient-weighted feature attribution.
+We document this proxy choice rather than overclaiming.
+\noindent\textit{(c) Small-subgroup DI is noisy.}
+For demographic subgroups with $n < 200$ observations the DI estimate
+has high variance; Beta calibration~\citep{kull2017beta} may be
+preferable for those groups but is out of scope for this work.
+\noindent\textit{(d) Single-user single-GPU scope.}
+The sequential-loading \texttt{GPUManager} singleton does not scale
+across worker processes; multi-user serving stacks (vLLM, TGI) require a
+different design.
+
+\paragraph{Future work.}
+Gradient access via vLLM's logprobs endpoint or a hidden-state adapter
+would unlock Semantic-Entropy-Probes~\citep{kossen2024probes} for
+stronger consistency signals and
+Lookback-Lens~\citep{chuang2024lookback} for principled faithfulness
+attribution.
+Multi-turn conversational equity, group-conditional attribution, and a
+FAccT-format extension are the natural next directions.
+
+% ── 7. Conclusion ────────────────────────────────────────────────────────────
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented \textbf{ARIA}, a runtime fairness-audit harness that closes
+the audit--runtime gap for locally-deployed conversational LLMs.
+ARIA runs five complementary audit axes---calibration, faithfulness,
+consistency, equity, and attribution---in a single sub-1.2-second pass on
+consumer GPU hardware (RTX~4060 8\,GB), with Page-Hinkley drift detection
+across all five axes.
+The equity axis---inline counterfactual Disparate Impact and Equalized
+Odds Gap on free-form conversational outputs---is the primary novel
+contribution: it detects 33--39\% of failure cases missed by all three
+existing inline tools, and it is the only inline system that measures
+demographic fairness metrics on deployed conversational LLMs.
+
+ARIA is open-source and pip-installable with no cloud dependency.
+Code, evaluation suites, and pre-generated figures are available at
+\url{https://github.com/Rajveer-code/aria-audit}; the benchmark JSONL
+suites are released on Hugging~Face as
+\texttt{rajveerpall/aria-audit-bench}.
+
+% ── References ────────────────────────────────────────────────────────────────
+\bibliography{refs}
+
+\end{document}

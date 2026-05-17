@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aria-audit"
+version = "0.1.0"
+description = "Runtime five-axis fairness audit for locally-deployed conversational LLMs. Operationalizes the CPFE evaluation framework on deployed inference."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Rajveer Singh Pall", email = "rajveerpall04@gmail.com" }]
+requires-python = ">=3.10"
+keywords = ["llm", "fairness", "audit", "calibration", "rag", "responsible-ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "pydantic>=2.6",
+    "httpx>=0.27",
+    "tqdm>=4.66",
+    "torch>=2.2",
+    "transformers>=4.41",
+    "sentence-transformers>=3.0",
+    "pandas>=2.2",
+]
+
+[project.optional-dependencies]
+gpu = ["bitsandbytes>=0.43"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.4", "matplotlib>=3.8"]
+
+[project.scripts]
+aria-audit = "aria_audit.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Rajveer-code/aria-audit"
+Issues = "https://github.com/Rajveer-code/aria-audit/issues"
+
+[tool.setuptools.packages.find]
+include = ["aria_audit*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+.installed.cfg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Project artifacts
+*.sqlite
+*.db
+eval/results/*.json
+eval/results/*.csv
+paper/figs/*.png
+paper/figs/*.pdf
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.bbl
+paper/*.blg
+paper/*.pdf
+
+# Models (never commit weights)
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+models/
+
+# Data (large)
+data/raw/
+data/cache/
+
+# Claude / agent metadata
+.claude/
